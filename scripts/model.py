@@ -43,6 +43,8 @@ def load_model(model_name, device, cache_dir):
     model_kwargs = {}
     if model_name in float16_models:
         model_kwargs.update(dict(torch_dtype=torch.float16))
+    if "llama2" in model_name:
+        model_kwargs.update(dict(torch_dtype=torch.bfloat16))
     if 'gpt-j' in model_name:
         model_kwargs.update(dict(revision='float16'))
     model = from_pretrained(AutoModelForCausalLM, model_fullname, model_kwargs, cache_dir)

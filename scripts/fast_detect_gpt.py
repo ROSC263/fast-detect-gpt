@@ -150,6 +150,89 @@ def experiment(args):
         json.dump(results, fout)
         print(f'Results written into {results_file}')
 
+def evaluation_sft_model(model, tokenizer, epoch):
+    # load model
+    scoring_tokenizer = tokenizer
+    scoring_model = model
+    scoring_model.eval()
+    reference_model_name = "llama2-7b"
+    device = "cuda"
+    cache_dir = "./ckpt"
+    dataset = "WildChat"
+    
+    reference_tokenizer = load_tokenizer(reference_model_name, dataset, cache_dir)
+    reference_model = load_model(reference_model_name, device, cache_dir)
+    reference_model.eval()
+    # load data
+    dataset_file = "/home/dongk/dkgroup/congzeng/fast-detect-gpt/exp_gpt3to4/data/pubmed_gpt-3.5-turbo"
+    data = load_data(dataset_file)
+    n_samples = len(data["sampled"])
+    # evaluate criterion
+    if True:
+        name = "sampling_discrepancy_analytic"
+        criterion_fn = get_sampling_discrepancy_analytic
+    else:
+        name = "sampling_discrepancy"
+        criterion_fn = get_sampling_discrepancy
+
+    random.seed(0)
+    torch.manual_seed(0)
+    np.random.seed(0)
+    results = []
+    for idx in tqdm.tqdm(range(n_samples), desc=f"Computing {name} criterion"):
+        original_text = data["original"][idx]
+        sampled_text = data["sampled"][idx]
+        # original text
+        tokenized = scoring_tokenizer(original_text, return_tensors="pt", padding=True, return_token_type_ids=False).to(device)
+        # tokenized = scoring_tokenizer(original_text, return_tensors="pt", padding="max_length", max_length=200, return_token_type_ids=False).to(args.device)
+        labels = tokenized.input_ids[:, 1:]
+        with torch.no_grad():
+            logits_score = scoring_model(**tokenized).logits[:, :-1]
+            
+            tokenized = reference_tokenizer(original_text, return_tensors="pt", padding=True, return_token_type_ids=False).to(device)
+            # tokenized = reference_tokenizer(original_text, return_tensors="pt", padding="max_length", max_length=200, return_token_type_ids=False).to(args.device)
+            assert torch.all(tokenized.input_ids[:, 1:] == labels), "Tokenizer is mismatch."
+            logits_ref = reference_model(**tokenized).logits[:, :-1]
+            original_crit = criterion_fn(logits_ref, logits_score, labels)
+        # sampled text
+        tokenized = scoring_tokenizer(sampled_text, return_tensors="pt", padding=True, return_token_type_ids=False).to(device)
+        # tokenized = scoring_tokenizer(sampled_text, return_tensors="pt", padding="max_length", max_length=200, return_token_type_ids=False).to(args.device)
+        labels = tokenized.input_ids[:, 1:]
+        with torch.no_grad():
+            logits_score = scoring_model(**tokenized).logits[:, :-1]
+            tokenized = reference_tokenizer(sampled_text, return_tensors="pt", padding=True, return_token_type_ids=False).to(device)
+            # tokenized = reference_tokenizer(sampled_text, return_tensors="pt", padding="max_length", max_length=200, return_token_type_ids=False).to(args.device)
+            assert torch.all(tokenized.input_ids[:, 1:] == labels), "Tokenizer is mismatch."
+            logits_ref = reference_model(**tokenized).logits[:, :-1]
+            sampled_crit = criterion_fn(logits_ref, logits_score, labels)
+        # result
+        results.append({"original": original_text,
+                        "original_crit": original_crit,
+                        "sampled": sampled_text,
+                        "sampled_crit": sampled_crit})
+
+    # compute prediction scores for real/sampled passages
+    predictions = {'real': [x["original_crit"] for x in results],
+                   'samples': [x["sampled_crit"] for x in results]}
+    print(f"Real mean/std: {np.mean(predictions['real']):.2f}/{np.std(predictions['real']):.2f}, Samples mean/std: {np.mean(predictions['samples']):.2f}/{np.std(predictions['samples']):.2f}")
+    fpr, tpr, roc_auc = get_roc_metrics(predictions['real'], predictions['samples'])
+    p, r, pr_auc = get_precision_recall_metrics(predictions['real'], predictions['samples'])
+    print(f"Criterion {name}_threshold ROC AUC: {roc_auc:.4f}, PR AUC: {pr_auc:.4f}")
+    # results
+    output_file = "./"
+    results_file = f'{output_file}.{name}_{epoch}.json'
+    results = { 'name': f'{name}_threshold',
+                'info': {'n_samples': n_samples},
+                'predictions': predictions,
+                'raw_results': results,
+                'metrics': {'roc_auc': roc_auc, 'fpr': fpr, 'tpr': tpr},
+                'pr_metrics': {'pr_auc': pr_auc, 'precision': p, 'recall': r},
+                'loss': 1 - pr_auc}
+    with open(results_file, 'w') as fout:
+        json.dump(results, fout)
+        print(f'Results written into {results_file}')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_file', type=str, default="./exp_test/results/xsum_gpt2")
