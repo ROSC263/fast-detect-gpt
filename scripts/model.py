@@ -30,9 +30,10 @@ model_fullnames = {  'gpt2': 'gpt2',
                      'bloom-7b1': 'bigscience/bloom-7b1',
                      'opt-13b': 'facebook/opt-13b',
                      'vicuna-7b-v1.5':'lmsys/vicuna-7b-v1.5',
-                     'llama2-7b': "meta-llama/Llama-2-7b-hf"
+                     'llama2-7b': "meta-llama/Llama-2-7b-hf",
+                     'llama3-8b':'meta-llama/Meta-Llama-3-8B'
                      }
-float16_models = ['gpt-j-6B', 'gpt-neox-20b', 'llama-13b', 'llama2-13b', 'bloom-7b1', 'opt-13b', 'llama2-7b', 'vicuna-7b-v1.5']
+float16_models = ['gpt-j-6B', 'gpt-neox-20b', 'llama-13b', 'llama2-13b', 'bloom-7b1', 'opt-13b', 'llama2-7b', 'vicuna-7b-v1.5','llama3-8b']
 
 def get_model_fullname(model_name):
     return model_fullnames[model_name] if model_name in model_fullnames else model_name
@@ -45,6 +46,10 @@ def load_model(model_name, device, cache_dir):
         model_kwargs.update(dict(torch_dtype=torch.float16))
     if "llama2" in model_name:
         model_kwargs.update(dict(torch_dtype=torch.bfloat16))
+    if "llama3" in model_name:
+        model_kwargs.update(dict(torch_dtype=torch.bfloat16))
+    # if "gpt-neo-2.7B" in model_name:
+    #     model_kwargs.update(dict(torch_dtype=torch.float16))
     if 'gpt-j' in model_name:
         model_kwargs.update(dict(revision='float16'))
     model = from_pretrained(AutoModelForCausalLM, model_fullname, model_kwargs, cache_dir)

@@ -91,7 +91,7 @@ class PrefixSampler:
         for batch in range(len(raw_data) // batch_size):
             print('Generating samples for batch', batch, 'of', len(raw_data) // batch_size)
             original_text = raw_data[batch * batch_size:(batch + 1) * batch_size]
-            sampled_text = self._sample_from_model(original_text, min_words=30 if self.args.dataset in ['pubmed'] else 55, truncate_ratio=self.args.truncate_ratio)
+            sampled_text = self._sample_from_model(original_text, min_words=30 if self.args.dataset in ['pubmed','german'] else 55, truncate_ratio=self.args.truncate_ratio)
 
             for o, s in zip(original_text, sampled_text):
                 if self.args.dataset == 'pubmed':
@@ -178,6 +178,70 @@ def experiment(args):
     print(f"Criterion {name}_threshold ROC AUC: {roc_auc:.4f}, PR AUC: {pr_auc:.4f}")
     # results
     results_file = f'{args.output_file}.{name}.json'
+    results = { 'name': f'{name}_threshold',
+                'info': {'n_samples': n_samples},
+                'predictions': predictions,
+                'raw_results': results,
+                'metrics': {'roc_auc': roc_auc, 'fpr': fpr, 'tpr': tpr},
+                'pr_metrics': {'pr_auc': pr_auc, 'precision': p, 'recall': r},
+                'loss': 1 - pr_auc}
+    with open(results_file, 'w') as fout:
+        json.dump(results, fout)
+        print(f'Results written into {results_file}')
+
+def evaluation_sft_model_dna(model, tokenizer, epoch, dataset, dataset_file):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output_file', type=str, default="./exp_test/results/pubmed_davinci")
+    parser.add_argument('--dataset', type=str, default=dataset)
+    parser.add_argument('--dataset_file', type=str, default=dataset_file)
+    parser.add_argument('--truncate_ratio', type=float, default=0.5)
+    parser.add_argument('--regen_number', type=int, default=10)
+    parser.add_argument('--base_model_name', type=str, default="llama2-7b")
+    parser.add_argument('--batch_size', type=int, default=10)
+    parser.add_argument('--do_top_k', action='store_true')
+    parser.add_argument('--top_k', type=int, default=40)
+    parser.add_argument('--do_top_p', action='store_true')
+    parser.add_argument('--top_p', type=float, default=0.96)
+    parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--device', type=str, default="cuda")
+    parser.add_argument('--cache_dir', type=str, default="../cache")
+    args = parser.parse_args()
+
+    sampler = PrefixSampler(args)
+    sampler.base_tokenizer = tokenizer
+    sampler.base_model = model
+    # load data
+    data = load_data(dataset_file)
+    n_samples = len(data["sampled"])
+    # evaluate criterion
+    name = "dna_gpt"
+    criterion_fn = get_dna_gpt
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    results = []
+    for idx in tqdm.tqdm(range(n_samples), desc=f"Computing {name} criterion"):
+        original_text = data["original"][idx]
+        sampled_text = data["sampled"][idx]
+        # original text
+        original_crit = criterion_fn(sampler, original_text)
+        # sampled text
+        sampled_crit = criterion_fn(sampler, sampled_text)
+        # result
+        results.append({"original": original_text,
+                        "original_crit": original_crit,
+                        "sampled": sampled_text,
+                        "sampled_crit": sampled_crit})
+
+    # compute prediction scores for real/sampled passages
+    predictions = {'real': [x["original_crit"] for x in results],
+                   'samples': [x["sampled_crit"] for x in results]}
+    fpr, tpr, roc_auc = get_roc_metrics(predictions['real'], predictions['samples'])
+    p, r, pr_auc = get_precision_recall_metrics(predictions['real'], predictions['samples'])
+    print(f"Criterion {name}_threshold ROC AUC: {roc_auc:.4f}, PR AUC: {pr_auc:.4f}")
+    # results
+    results_file = f"./exp_gpt3.5turbo0301/dna_results/dna_{dataset}_gpt3.5_single.llama2-7b_llama2-7b.(5000_sft)"
     results = { 'name': f'{name}_threshold',
                 'info': {'n_samples': n_samples},
                 'predictions': predictions,

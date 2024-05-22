@@ -1,1 +1,1 @@
-python scripts/train_score_model.py
+accelerate launch scripts/train_score_model.py

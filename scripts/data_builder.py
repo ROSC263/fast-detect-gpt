@@ -12,6 +12,7 @@ import argparse
 import os
 import json
 import custom_datasets
+from datasets import load_dataset
 from model import load_tokenizer, load_model
 
 
@@ -31,6 +32,8 @@ def save_data(output_file, args, data):
 
 def load_data(input_file):
     data_file = f"{input_file}.raw_data.json"
+    # data_file = input_file
+    # data_file = "/home/dongk/dkgroup/congzeng/fast-detect-gpt/exp_gpt4-0613/data/replaced_pubmed_gpt-4-0613.t5-3b.perturbation_1.raw_data_0.1.json"
     with open(data_file, "r") as fin:
         data = json.load(fin)
         print(f"Raw data loaded from {data_file}")
@@ -48,14 +51,16 @@ class DataBuilder:
             return ' '.join(text.split(' ')[:-1])
 
         import openai
+        # import anthropic
         assert self.args.openai_key is not None, "Must provide OpenAI API key as --openai_key"
         openai.api_key = self.args.openai_key
+
         if self.args.openai_base is not None:
             openai.api_base = self.args.openai_base
 
         if self.args.dataset != 'pubmed':  # keep Answer: prefix for pubmed
             prefix = _drop_last_word(prefix)
-
+        # client = anthropic.Anthropic(api_key=self.args.openai_key)
         # sample from the openai model
         kwargs = {"max_tokens": 200}
         if self.args.do_top_p:
@@ -65,26 +70,35 @@ class DataBuilder:
         elif self.args.do_temperature:
             kwargs['temperature'] = self.args.temperature
 
-        if self.args.openai_model == 'davinci':
-            kwargs["engine"] = self.args.openai_model
-            response = openai.Completion.create(prompt=f"{prefix}", **kwargs)
-            return prefix + response['choices'][0]['text']
+        # if self.args.openai_model == 'davinci':
+        #     kwargs["engine"] = self.args.openai_model
+        #     response = openai.Completion.create(prompt=f"{prefix}", **kwargs)
+        #     return prefix + response['choices'][0]['text']
 
-        elif self.args.openai_model in ['gpt-3.5-turbo', 'gpt-4']:
+        if self.args.openai_model in ['gpt-3.5-turbo-0301', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-0613','gpt-3.5-turbo-0613','gpt-3.5-turbo-1106','gpt-3.5-turbo-0125','gpt-4-turbo-2024-04-09','gpt-4-0125-preview','gpt-4-1106-preview','claude-3-opus-20240229']:
             roles = {'xsum': 'You are a News writer.',
                      'writing': 'You are a Fiction writer.',
-                     'pubmed': 'You are a Technical writer.'}
+                     'pubmed': 'You are a Technical writer.',
+                     'german':'You are a writer'}
             prompts = {'xsum': 'Please write an article with about 150 words starting exactly with:',
                        'writing': 'Please write an article with about 150 words starting exactly with:',
-                       'pubmed': 'Please answer the question in about 50 words.'}
+                       'pubmed': 'Please answer the question in about 50 words.',
+                       'german': 'Please complete a passage in German with about 150 words, starting exactly with:'}
             messages = [
                 {'role': 'system', 'content': roles[self.args.dataset]},
                 {'role': 'user', 'content': f'{prompts[self.args.dataset]} {prefix}'},
             ]
             kwargs["model"] = self.args.openai_model
             kwargs["messages"] = messages
+
+        
+            # for open ai
             response = openai.ChatCompletion.create(**kwargs)
             response = response['choices'][0]['message']['content']
+            # for claude3
+            # kwargs["system"]= roles[self.args.dataset]
+            # response = client.messages.create(**kwargs)
+            # response = response.content[0].text
             # ChatGPT may repeat the prefix
             if response.startswith(prefix[:20]):
                 return response
@@ -193,6 +207,36 @@ class DataBuilder:
 
         return data
 
+    def generate_training_samples(self):
+        dataset = load_dataset("allenai/WildChat", split="train")
+        def filter_by_english(sample):
+            return sample["language"] == 'English' and len(sample["conversation"][0]['content'].split()) < 300
+        dataset = dataset.filter(filter_by_english)
+        dataset = dataset.train_test_split(train_size=6000)["train"]
+        
+        self.base_model.eval()
+
+        min_length =  10
+        sampling_kwargs = {}
+
+        def map_fn(data):
+            out = {}
+            conv = data["conversation"]
+            texts = conv[0]['content']
+            all_encoded = self.base_tokenizer(texts, return_tensors="pt", return_token_type_ids=False, max_length=256, truncation=True,).to(self.args.device)
+            outputs = self.base_model.generate(**all_encoded, min_length=min_length, max_length=300, do_sample=True,
+                                                    **sampling_kwargs, pad_token_id=self.base_tokenizer.eos_token_id,
+                                                    eos_token_id=self.base_tokenizer.eos_token_id)
+            decoded = self.base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            out["llama3_8b_output"] = decoded[0].replace(texts, "")
+            out["llama3_8b_prompt"] = texts
+            return out
+        dataset_mapped = dataset.map(map_fn)
+        dataset_mapped.push_to_hub("Shengkun/llama3_texts")
+
+
+
+
 def generate_data(args, dataset, key):
     # strip newlines from each example; replace one or more newlines with a single space
     def _strip_newlines(text):
@@ -271,6 +315,7 @@ if __name__ == '__main__':
 
     print(f'Loading dataset {args.dataset}...')
     dataset_keys = {'xsum': 'document', 'squad': 'context', 'writing': 'document'}
-    data = generate_data(args, args.dataset, dataset_keys[args.dataset] if args.dataset in dataset_keys else None)
-
-    save_data(args.output_file, args, data)
+    # data = generate_data(args, args.dataset, dataset_keys[args.dataset] if args.dataset in dataset_keys else None)
+    data_builder = DataBuilder(args)
+    data_builder.generate_training_samples()
+    # save_data(args.output_file, args, data)

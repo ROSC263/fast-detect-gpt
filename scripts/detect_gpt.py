@@ -180,13 +180,13 @@ def generate_perturbs(args):
             "perturbed_original": p_original_text
         })
 
-    save_data(f'{args.dataset_file}.{args.mask_filling_model_name}.{name}', args, perturbs)
+    save_data(f'{args.dataset_file}.{args.mask_filling_model_name}.{name}._percent_{args.pct_words_masked}', args, perturbs)
 
 
 def experiment(args):
     n_perturbations = args.n_perturbations
     name = f'perturbation_{n_perturbations}'
-    perturb_file = f'{args.dataset_file}.{args.mask_filling_model_name}.{name}.raw_data.json'
+    perturb_file = f'{args.dataset_file}.{args.mask_filling_model_name}.{name}._percent_{args.pct_words_masked}.raw_data.json'
     if os.path.exists(perturb_file):
         print(f'Use existing perturbation file: {perturb_file}')
     else:
@@ -275,8 +275,7 @@ def experiment(args):
         json.dump(results, fout)
         print(f'Results written into {results_file}')
 
-
-if __name__ == '__main__':
+def evaluation_sft_model_detect(model, tokenizer, epoch, dataset, dataset_file):
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_file', type=str, default="./exp_test/results/xsum_gpt2")
     parser.add_argument('--dataset', type=str, default="xsum")
@@ -284,7 +283,123 @@ if __name__ == '__main__':
     parser.add_argument('--pct_words_masked', type=float, default=0.3) # pct masked is actually pct_words_masked * (span_length / (span_length + 2 * buffer_size))
     parser.add_argument('--mask_top_p', type=float, default=1.0)
     parser.add_argument('--span_length', type=int, default=2)
-    parser.add_argument('--n_perturbations', type=int, default=10)
+    parser.add_argument('--n_perturbations', type=int, default=100)
+    parser.add_argument('--scoring_model_name', type=str, default="gpt2")
+    parser.add_argument('--mask_filling_model_name', type=str, default="t5-3b")
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--device', type=str, default="cuda")
+    parser.add_argument('--cache_dir', type=str, default="../cache")
+    args = parser.parse_args()
+    
+    args.dataset = dataset
+    args.dataset_file = dataset_file
+
+
+    n_perturbations = args.n_perturbations
+    name = f'perturbation_{n_perturbations}'
+    perturb_file = f'{args.dataset_file}.{args.mask_filling_model_name}.{name}.raw_data.json'
+    if os.path.exists(perturb_file):
+        print(f'Use existing perturbation file: {perturb_file}')
+    else:
+        generate_perturbs(args)
+    # load model
+    # scoring_tokenizer = load_tokenizer(args.scoring_model_name, args.dataset, args.cache_dir)
+    # scoring_model = load_model(args.scoring_model_name, 'cpu', args.cache_dir)
+    scoring_tokenizer = tokenizer
+    scoring_model = model
+    scoring_model.eval()
+    scoring_model.to(args.device)
+    # load data
+    data = load_data(f'{args.dataset_file}.{args.mask_filling_model_name}.{name}')
+    n_samples = len(data)
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    # Evaluate
+    results = data
+    for idx in tqdm.tqdm(range(n_samples), desc=f"Computing {name} criterion"):
+        original_text = results[idx]["original"]
+        sampled_text = results[idx]["sampled"]
+        perturbed_original = results[idx]["perturbed_original"]
+        perturbed_sampled = results[idx]["perturbed_sampled"]
+        # original text
+        original_ll = get_ll(args, scoring_model, scoring_tokenizer, original_text)
+        p_original_ll = get_lls(args, scoring_model, scoring_tokenizer, perturbed_original)
+        # sampled text
+        sampled_ll = get_ll(args, scoring_model, scoring_tokenizer, sampled_text)
+        p_sampled_ll = get_lls(args, scoring_model, scoring_tokenizer, perturbed_sampled)
+        # result
+        results[idx]["original_ll"] = original_ll
+        results[idx]["sampled_ll"] = sampled_ll
+        results[idx]["all_perturbed_sampled_ll"] = p_sampled_ll
+        results[idx]["all_perturbed_original_ll"] = p_original_ll
+        results[idx]["perturbed_sampled_ll"] = np.mean(p_sampled_ll)
+        results[idx]["perturbed_original_ll"] = np.mean(p_original_ll)
+        results[idx]["perturbed_sampled_ll_std"] = np.std(p_sampled_ll) if len(p_sampled_ll) > 1 else 1
+        results[idx]["perturbed_original_ll_std"] = np.std(p_original_ll) if len(p_original_ll) > 1 else 1
+
+    # compute diffs with perturbed
+    predictions = {'real': [], 'samples': []}
+    for res in results:
+        if res['perturbed_original_ll_std'] == 0:
+            res['perturbed_original_ll_std'] = 1
+            print("WARNING: std of perturbed original is 0, setting to 1")
+            print(f"Number of unique perturbed original texts: {len(set(res['perturbed_original']))}")
+            print(f"Original text: {res['original']}")
+        if res['perturbed_sampled_ll_std'] == 0:
+            res['perturbed_sampled_ll_std'] = 1
+            print("WARNING: std of perturbed sampled is 0, setting to 1")
+            print(f"Number of unique perturbed sampled texts: {len(set(res['perturbed_sampled']))}")
+            print(f"Sampled text: {res['sampled']}")
+        predictions['real'].append((res['original_ll'] - res['perturbed_original_ll']) / res['perturbed_original_ll_std'])
+        predictions['samples'].append((res['sampled_ll'] - res['perturbed_sampled_ll']) / res['perturbed_sampled_ll_std'])
+
+    print(f"Real mean/std: {np.mean(predictions['real']):.2f}/{np.std(predictions['real']):.2f}, Samples mean/std: {np.mean(predictions['samples']):.2f}/{np.std(predictions['samples']):.2f}")
+    fpr, tpr, roc_auc = get_roc_metrics(predictions['real'], predictions['samples'])
+    p, r, pr_auc = get_precision_recall_metrics(predictions['real'], predictions['samples'])
+    print(f"Criterion {name}_threshold ROC AUC: {roc_auc:.4f}, PR AUC: {pr_auc:.4f}")
+
+    # results
+    output_file = f"./detect_ablation/llama2_results/{dataset}_gpt4_single.llama2-7b_llama2-7b.(5000_sft)"
+    results_file = f'{output_file}.{name}.json'
+    results = {
+        'name': name,
+        'info': {
+            'pct_words_masked': args.pct_words_masked,
+            'span_length': args.span_length,
+            'n_perturbations': args.n_perturbations,
+            'n_samples': n_samples,
+        },
+        'predictions': predictions,
+        'raw_results': results,
+        'metrics': {
+            'roc_auc': roc_auc,
+            'fpr': fpr,
+            'tpr': tpr,
+        },
+        'pr_metrics': {
+            'pr_auc': pr_auc,
+            'precision': p,
+            'recall': r,
+        },
+        'loss': 1 - pr_auc,
+    }
+    with open(results_file, 'w') as fout:
+        json.dump(results, fout)
+        print(f'Results written into {results_file}')
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output_file', type=str, default="./exp_test/results/xsum_gpt2")
+    parser.add_argument('--dataset', type=str, default="xsum")
+    parser.add_argument('--dataset_file', type=str, default="./exp_test/data/xsum_gpt2")
+    parser.add_argument('--pct_words_masked', type=float, default=0.5) # pct masked is actually pct_words_masked * (span_length / (span_length + 2 * buffer_size))
+    parser.add_argument('--mask_top_p', type=float, default=1.0)
+    parser.add_argument('--span_length', type=int, default=5)
+    parser.add_argument('--n_perturbations', type=int, default=100)
     parser.add_argument('--scoring_model_name', type=str, default="gpt2")
     parser.add_argument('--mask_filling_model_name', type=str, default="t5-small")
     parser.add_argument('--seed', type=int, default=0)

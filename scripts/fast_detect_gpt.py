@@ -150,21 +150,21 @@ def experiment(args):
         json.dump(results, fout)
         print(f'Results written into {results_file}')
 
-def evaluation_sft_model(model, tokenizer, epoch):
-    # load model
+def evaluation_sft_model(model, tokenizer, epoch, dataset, dataset_file):
+    epoch = str(round(epoch, 2))# load model
     scoring_tokenizer = tokenizer
     scoring_model = model
     scoring_model.eval()
     reference_model_name = "llama2-7b"
     device = "cuda"
     cache_dir = "./ckpt"
-    dataset = "WildChat"
+    # dataset = "WildChat"
     
     reference_tokenizer = load_tokenizer(reference_model_name, dataset, cache_dir)
     reference_model = load_model(reference_model_name, device, cache_dir)
     reference_model.eval()
     # load data
-    dataset_file = "/home/dongk/dkgroup/congzeng/fast-detect-gpt/exp_gpt3to4/data/pubmed_gpt-3.5-turbo"
+    # dataset_file = "/home/dongk/dkgroup/congzeng/fast-detect-gpt/exp_gpt3to4/data/pubmed_gpt-3.5-turbo"
     data = load_data(dataset_file)
     n_samples = len(data["sampled"])
     # evaluate criterion
@@ -219,8 +219,10 @@ def evaluation_sft_model(model, tokenizer, epoch):
     p, r, pr_auc = get_precision_recall_metrics(predictions['real'], predictions['samples'])
     print(f"Criterion {name}_threshold ROC AUC: {roc_auc:.4f}, PR AUC: {pr_auc:.4f}")
     # results
-    output_file = "./"
-    results_file = f'{output_file}.{name}_{epoch}.json'
+    import os
+    dataset_file = dataset_file.split("/")[-1]
+    output_file = f"./exp_llama3/llama2_on_llama3_ours_results/{dataset_file}_llama3-8b_single.llama2-7b_llama2-7b.(5000_sft)"
+    results_file = f'{output_file}.{name}.json'
     results = { 'name': f'{name}_threshold',
                 'info': {'n_samples': n_samples},
                 'predictions': predictions,

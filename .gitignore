@@ -2,3 +2,8 @@ results/
 ckpt/
 __pycache__
 .vscode/
+data/
+exp*
+llama2_logits.pt
+llama3_logits.pt
+*.sh
